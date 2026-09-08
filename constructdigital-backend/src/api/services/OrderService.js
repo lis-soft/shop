@@ -10,6 +10,10 @@ const UserTask = require('@/admin/models/UserTask')
 const Vip = require('@/admin/models/Vip')
 
 const ACTIVE_FROZEN_ORDER_STATUSES = [0, 2, 3, 5]
+const AUTO_ORDER_PRICE_MIN_PERCENT_KEY = 'auto_order_price_min_percent'
+const AUTO_ORDER_PRICE_MAX_PERCENT_KEY = 'auto_order_price_max_percent'
+const DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT = 30
+const DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT = 80
 
 class OrderService extends BaseService {
     getAvailableBalance(user) {
@@ -100,6 +104,95 @@ class OrderService extends BaseService {
             },
             transaction
         })
+    }
+
+    parsePercentConfig(value, fallback) {
+        const parsed = parseFloat(value)
+        if (!Number.isFinite(parsed)) {
+            return fallback
+        }
+
+        return parsed
+    }
+
+    async getAutoOrderPricePercentConfig(transaction = null) {
+        const rows = await Config.findAll({
+            where: {
+                key: {
+                    [Op.in]: [AUTO_ORDER_PRICE_MIN_PERCENT_KEY, AUTO_ORDER_PRICE_MAX_PERCENT_KEY]
+                }
+            },
+            transaction
+        })
+
+        const valueMap = Object.fromEntries(rows.map(row => [row.key, row.value]))
+        let minPercent = this.parsePercentConfig(
+            valueMap[AUTO_ORDER_PRICE_MIN_PERCENT_KEY],
+            DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT
+        )
+        let maxPercent = this.parsePercentConfig(
+            valueMap[AUTO_ORDER_PRICE_MAX_PERCENT_KEY],
+            DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT
+        )
+
+        if (minPercent <= 0 || maxPercent <= 0 || minPercent > 100 || maxPercent > 100 || minPercent > maxPercent) {
+            minPercent = DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT
+            maxPercent = DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT
+        }
+
+        return { minPercent, maxPercent }
+    }
+
+    calcAutoOrderPriceRange(availableBalance, minPercent, maxPercent) {
+        const balance = parseFloat(availableBalance)
+        const normalizedBalance = Number.isFinite(balance) ? balance : 0
+        const minPrice = +(normalizedBalance * minPercent / 100).toFixed(2)
+        const maxPrice = +(normalizedBalance * maxPercent / 100).toFixed(2)
+
+        return {
+            minPrice: Math.min(minPrice, maxPrice),
+            maxPrice: Math.max(minPrice, maxPrice)
+        }
+    }
+
+    async selectProductInBalancePercentRange(availableBalance, usedProductIds = [], transaction = null) {
+        const { minPercent, maxPercent } = await this.getAutoOrderPricePercentConfig(transaction)
+        const { minPrice, maxPrice } = this.calcAutoOrderPriceRange(availableBalance, minPercent, maxPercent)
+
+        if (!(maxPrice > 0) || minPrice > maxPrice) {
+            return null
+        }
+
+        const availableWhere = {
+            status: 1,
+            price: {
+                [Op.gte]: minPrice,
+                [Op.lte]: maxPrice
+            }
+        }
+
+        if (usedProductIds.length > 0) {
+            availableWhere.id = { [Op.notIn]: usedProductIds }
+        }
+
+        const availableProducts = await Product.findAll({
+            where: availableWhere,
+            transaction
+        })
+
+        if (!availableProducts.length) {
+            return null
+        }
+
+        const midPrice = (minPrice + maxPrice) / 2
+        availableProducts.sort((a, b) => {
+            const diffA = Math.abs(parseFloat(a.price) - midPrice)
+            const diffB = Math.abs(parseFloat(b.price) - midPrice)
+            return diffA - diffB
+        })
+
+        const topProducts = availableProducts.slice(0, Math.min(3, availableProducts.length))
+        return topProducts[Math.floor(Math.random() * topProducts.length)]
     }
 
     async findAffordableProduct(balance, usedProductIds = [], transaction = null) {
@@ -393,56 +486,17 @@ class OrderService extends BaseService {
                 transaction
             }).then(orders => orders.map(o => o.product_id))
 
-            let finalProduct
-            let price
+            const finalProduct = await this.selectProductInBalancePercentRange(
+                availableBalance,
+                usedProductIds,
+                transaction
+            )
 
-            if (taskForce === 0) {
-                const result = await this._selectNormalProduct(user, vip, availableBalance, usedProductIds, transaction)
-                finalProduct = result.product
-                price = result.price
-            } else {
-                let minPrice
-                let maxPrice
-
-                if (vip.vip_level === 1 && taskForce >= 1) {
-                    minPrice = Math.max(availableBalance * 0.35, 3500)
-                    maxPrice = availableBalance * 0.45
-                } else {
-                    minPrice = taskForce > 0 ? 3500 : 0
-                    maxPrice = availableBalance
-                }
-
-                const availableProducts = await Product.findAll({
-                    where: {
-                        status: 1,
-                        price: { [Op.gte]: minPrice, [Op.lte]: maxPrice },
-                        id: { [Op.notIn]: usedProductIds.length > 0 ? usedProductIds : [0] }
-                    },
-                    transaction
-                })
-
-                if (availableProducts.length > 0) {
-                    if (vip.vip_level === 1 && taskForce > 1) {
-                        finalProduct = availableProducts[Math.floor(Math.random() * availableProducts.length)]
-                    } else {
-                        availableProducts.sort((a, b) => {
-                            const diffA = Math.abs(parseFloat(a.price) - availableBalance)
-                            const diffB = Math.abs(parseFloat(b.price) - availableBalance)
-                            return diffA - diffB
-                        })
-                        const topProducts = availableProducts.slice(0, Math.min(3, availableProducts.length))
-                        finalProduct = topProducts[Math.floor(Math.random() * topProducts.length)]
-                    }
-                } else {
-                    finalProduct = await this.findAffordableProduct(availableBalance, usedProductIds, transaction)
-                }
-
-                if (!finalProduct) {
-                    throw new Error('无可用商品')
-                }
-
-                price = parseFloat(finalProduct.price)
+            if (!finalProduct) {
+                throw new Error('暂无符合当前余额金额范围的商品')
             }
+
+            const price = parseFloat(finalProduct.price)
 
             if (!Number.isFinite(price) || price > availableBalance) {
                 throw new Error('当前余额不足以自动派单，请充值后重试')
@@ -828,88 +882,6 @@ class OrderService extends BaseService {
             page: parseInt(page),
             limit: parseInt(limit),
             totalPages: Math.ceil(count / parseInt(limit))
-        }
-    }
-
-    async _selectNormalProduct(user, vip, balance, usedProductIds, transaction = null) {
-        const taskCount = vip.task_count
-        const minTotalCommission = 950
-        const maxTotalCommission = 1050
-
-        const completedOrders = await Order.findAll({
-            where: { user_id: user.id, task_force: user.task_force, status: 1 },
-            transaction
-        })
-
-        const completedCommission = completedOrders.reduce((sum, o) => sum + parseFloat(o.order_commission), 0)
-        const completedTasks = completedOrders.length
-        const remainingTasks = taskCount - completedTasks
-
-        const maxPrice = Math.min(balance, 3400)
-
-        let availableProducts = await Product.findAll({
-            where: {
-                status: 1,
-                price: { [Op.lte]: maxPrice },
-                id: { [Op.notIn]: usedProductIds.length > 0 ? usedProductIds : [0] }
-            },
-            order: [['price', 'ASC']],
-            transaction
-        })
-
-        if (availableProducts.length === 0) {
-            const fallbackProduct = await this.findAffordableProduct(balance, usedProductIds, transaction)
-            if (!fallbackProduct) {
-                throw new Error('无可用商品')
-            }
-
-            return {
-                product: fallbackProduct,
-                price: parseFloat(fallbackProduct.price)
-            }
-        }
-
-        const targetTotalCommission = minTotalCommission + Math.random() * (maxTotalCommission - minTotalCommission)
-        const remainingCommission = Math.max(0, targetTotalCommission - completedCommission)
-        const avgCommissionPerTask = remainingCommission / Math.max(1, remainingTasks)
-
-        let targetCommission
-        if (remainingTasks === 1) {
-            targetCommission = Math.max(5, remainingCommission)
-        } else {
-            const progress = completedTasks / taskCount
-            let adjustFactor
-            if (progress < 0.3) {
-                adjustFactor = 1.2 + Math.random() * 0.6
-            } else if (progress < 0.7) {
-                adjustFactor = 0.8 + Math.random() * 0.4
-            } else {
-                adjustFactor = 0.5 + Math.random() * 0.3
-            }
-            targetCommission = Math.max(5, avgCommissionPerTask * adjustFactor)
-        }
-
-        const suitableProducts = availableProducts.filter(p => {
-            const commission = this.calculateCommissionByRate(p.price, vip.reward_rate)
-            return Math.abs(commission - targetCommission) <= targetCommission * 0.5
-        })
-
-        let selectedProduct
-        if (suitableProducts.length > 0) {
-            suitableProducts.sort((a, b) => {
-                const diffA = Math.abs(this.calculateCommissionByRate(a.price, vip.reward_rate) - targetCommission)
-                const diffB = Math.abs(this.calculateCommissionByRate(b.price, vip.reward_rate) - targetCommission)
-                return diffA - diffB
-            })
-            selectedProduct = suitableProducts[0]
-        } else {
-            availableProducts.sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
-            selectedProduct = availableProducts[Math.floor(availableProducts.length * 0.3)]
-        }
-
-        return {
-            product: selectedProduct,
-            price: parseFloat(selectedProduct.price)
         }
     }
 }

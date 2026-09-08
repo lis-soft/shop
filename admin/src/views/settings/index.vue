@@ -779,6 +779,38 @@
                   </a-card>
                 </div>
               </template>
+              <template v-else-if="group === 'order'">
+                <div class="website-config-layout">
+                  <a-card class="website-section-card" :bordered="false">
+                    <template #title>非卡单刷单金额范围</template>
+                    <div class="website-section-description">
+                      仅影响自动刷单。商品价格会落在「可用余额 × 最低占比」到「可用余额 × 最高占比」之间。卡单（中台手动派单）不受此限制。
+                      例如可用余额 1000、设置为 30%~80% 时，只派发 300~800 的商品。
+                    </div>
+                    <div class="website-section-grid">
+                      <a-form-item
+                        v-for="config in getConfigsByGroup('order')"
+                        :key="config.key"
+                        :label="config.description"
+                        :name="config.key"
+                        class="website-form-item"
+                        :label-col="{ span: 24 }"
+                        :wrapper-col="{ span: 24 }"
+                      >
+                        <a-input-number
+                          v-model:value="formState[config.key]"
+                          :min="0.01"
+                          :max="100"
+                          :step="1"
+                          :precision="0"
+                          style="width: 100%"
+                          addon-after="%"
+                        />
+                      </a-form-item>
+                    </div>
+                  </a-card>
+                </div>
+              </template>
               <template v-else-if="group === PAGE_CONTENT_GROUP">
                 <div class="page-content-config-layout">
                   <a-card
@@ -2711,19 +2743,19 @@ const isTimeConfig = (key) => {
 }
 
 const getNumberStep = (key) => {
-  return key.includes('fee') || key.includes('reward') || key.includes('rate')
-    ? 0.01
+  return key.includes('fee') || key.includes('reward') || key.includes('rate') || key.includes('percent')
+    ? (key.includes('percent') ? 1 : 0.01)
     : (key.includes('margin_top') ? 0.1 : 1)
 }
 
 const getNumberPrecision = (key) => {
   return key.includes('fee') || key.includes('reward') || key.includes('rate')
     ? 2
-    : (key.includes('margin_top') ? 1 : 0)
+    : (key.includes('percent') ? 0 : (key.includes('margin_top') ? 1 : 0))
 }
 
 const getNumberUnit = (key) => {
-  if (key.includes('fee') || key.includes('reward') || key.includes('rate')) {
+  if (key.includes('fee') || key.includes('reward') || key.includes('rate') || key.includes('percent')) {
     return '%'
   }
 
@@ -3273,6 +3305,30 @@ const saveSettings = async () => {
     if (maintenancePageContentConfig.value && !String(formState[SITE_MAINTENANCE_PAGE_CONTENT_KEY] || '').trim()) {
       message.error('维护页内容不能为空')
       return
+    }
+
+    const autoOrderMinPercent = parseFloat(formState.auto_order_price_min_percent)
+    const autoOrderMaxPercent = parseFloat(formState.auto_order_price_max_percent)
+    if (
+      Object.prototype.hasOwnProperty.call(formState, 'auto_order_price_min_percent')
+      || Object.prototype.hasOwnProperty.call(formState, 'auto_order_price_max_percent')
+    ) {
+      if (
+        !Number.isFinite(autoOrderMinPercent)
+        || !Number.isFinite(autoOrderMaxPercent)
+        || autoOrderMinPercent <= 0
+        || autoOrderMaxPercent <= 0
+        || autoOrderMinPercent > 100
+        || autoOrderMaxPercent > 100
+      ) {
+        message.error('刷单金额占比需在 0 到 100 之间')
+        return
+      }
+
+      if (autoOrderMinPercent > autoOrderMaxPercent) {
+        message.error('非卡单商品金额最低占比不能大于最高占比')
+        return
+      }
     }
 
     if (!String(formState[CERTIFICATE_PAGE_CONTENT_KEY] || '').trim()) {

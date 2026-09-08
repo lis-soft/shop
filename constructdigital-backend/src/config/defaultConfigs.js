@@ -156,6 +156,10 @@ const PROCESS_REVIEW_GROUP = 'process_review'
 const PROCESS_REVIEW_GROUP_DESCRIPTION = '流程题库配置'
 const FAQ_GROUP = 'faq'
 const FAQ_GROUP_DESCRIPTION = 'FAQ配置'
+const ORDER_GROUP = 'order'
+const ORDER_GROUP_DESCRIPTION = '刷单规则'
+const DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT = '30'
+const DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT = '80'
 const LEGACY_EVENT_CONFIG_KEYS = [
   'event_recharge_cashback_rules',
   'event_recharge_cashback_conditions'
@@ -1043,6 +1047,26 @@ const DEFAULT_CONFIGS = [
     description: '加入我们按钮链接',
     is_active: true,
     sort: 327
+  },
+  {
+    key: 'auto_order_price_min_percent',
+    value: DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT,
+    type: 'number',
+    group: ORDER_GROUP,
+    group_description: ORDER_GROUP_DESCRIPTION,
+    description: '非卡单商品金额最低占比（占可用余额%）',
+    is_active: true,
+    sort: 10
+  },
+  {
+    key: 'auto_order_price_max_percent',
+    value: DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT,
+    type: 'number',
+    group: ORDER_GROUP,
+    group_description: ORDER_GROUP_DESCRIPTION,
+    description: '非卡单商品金额最高占比（占可用余额%）',
+    is_active: true,
+    sort: 11
   }
 ]
 
@@ -1065,6 +1089,8 @@ module.exports = {
   DEFAULT_FAQ_ITEMS,
   DEFAULT_FAQ_PAGE_CONTENT,
   DEFAULT_CERTIFICATE_PAGE_CONTENT,
+  DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT,
+  DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT,
   OBSOLETE_CONFIG_KEYS,
   LEGACY_EVENT_CONFIG_KEYS
 }

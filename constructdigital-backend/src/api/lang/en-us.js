@@ -57,6 +57,7 @@ module.exports = {
   '订单已完成': 'Order completed',
   '冻结金额不足': 'Insufficient frozen amount',
   '无可用商品': 'No available products',
+  '暂无符合当前余额金额范围的商品': 'No products match the current balance price range',
   '商品不存在': 'Product does not exist',
   '获取商品信息成功': 'Product information retrieved successfully',
   '获取商品信息失败': 'Failed to get product information',
