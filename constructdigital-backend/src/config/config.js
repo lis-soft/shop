@@ -12,13 +12,13 @@ module.exports = {
     expires_in: '24h'
   },
 
-  // 数据库配置 线上
+  // 数据库配置 线上（部署到服务器时启用这段，并注释掉下方「本地」）
   // db: {
   //   host: '127.0.0.1',
   //   port: 3306,
   //   name: 'yysd',
   //   user: 'yysd',
-  //   password: 'hsBepjbhTDGyrbkk',
+  //   password: 'mHiSyESGC82BByFx',
   //   dialect: 'mysql',
   //   timezone: '+09:00',
   //   logging: false,
