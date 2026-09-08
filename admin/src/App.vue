@@ -1,0 +1,15 @@
+<template>
+  <router-view></router-view>
+</template>
+
+<style>
+body {
+  background-color: #f0f2f5;
+  color: #333;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+#app {
+  min-height: 100vh;
+}
+</style> 

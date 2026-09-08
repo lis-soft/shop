@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/png" href="%BASE_URL%logo.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="%BASE_URL%runtime-config.js?v=20260415-1"></script>
+  <title>CONSTRUCT DIGITAL</title>
+</head>
+
+<body>
+  <div id="app"></div>
+  <script>
+    (function () {
+      // 未登录访客使用的客服项目脚本。
+      var guestSupportUrl = 'https://plugin-code.salesmartly.com/js/project_669020_689992_1774967314.js'
+      // 登录用户使用公共客服时加载的项目脚本。
+      var publicSupportUrl = 'https://plugin-code.salesmartly.com/js/project_669020_689992_1774967314.js'
+      // 登录用户使用专属客服时加载的项目脚本。
+      var dedicatedSupportUrl = 'https://plugin-code.salesmartly.com/js/project_682615_704007_1776176648.js'
+      // 当前应加载的客服类型：guest、public、dedicated；为空表示暂不加载。
+      var supportType = ''
+      var hasToken = !!localStorage.getItem('token')
+      var isCustomerSupportEnabled = !!(window.__APP_CONFIG__ && window.__APP_CONFIG__.enableCustomerSupport)
+
+      if (!isCustomerSupportEnabled) {
+        window.__CUSTOMER_SUPPORT_DISABLED__ = true
+        window.__CUSTOMER_SUPPORT_TYPE__ = ''
+        window.__CUSTOMER_SUPPORT_SCRIPT_URL__ = ''
+        return
+      }
+
+      if (hasToken) {
+        try {
+          var userInfo = JSON.parse(localStorage.getItem('userInfo') || 'null')
+          if (userInfo && userInfo.customer_support && userInfo.customer_support.type === 'dedicated') {
+            supportType = 'dedicated'
+          } else if (userInfo && userInfo.customer_support && userInfo.customer_support.type === 'public') {
+            supportType = 'public'
+          }
+        } catch (error) {
+        }
+      }
+
+      if (!supportType && !hasToken) {
+        supportType = 'guest'
+      }
+
+      // 未登录访客直接加载访客客服；登录用户客服类型未知时，等用户信息刷新后再加载正确项目。
+      window.__CUSTOMER_SUPPORT_TYPE__ = supportType
+      window.__CUSTOMER_SUPPORT_SCRIPT_URL__ = supportType === 'dedicated'
+        ? dedicatedSupportUrl
+        : supportType === 'public'
+          ? publicSupportUrl
+          : supportType === 'guest'
+            ? guestSupportUrl
+            : ''
+
+      // 客服脚本由 src/utils/customerSupport.js 在 Vue 应用挂载后异步加载，
+      // 避免第三方脚本加载/请求异常阻塞首屏。
+    })()
+  </script>
+  <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>
