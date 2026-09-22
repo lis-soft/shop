@@ -27,7 +27,8 @@ class OrderController extends BaseController {
   submitOrder = async (req, res) => {
     try {
       const result = await orderService.submitOrder(req)
-      this.success(req, res, result, '订单已完成')
+      const message = result?.settlement_held ? '连单未结束，完成后统一返还' : '订单已完成'
+      this.success(req, res, result, message)
     } catch (error) {
       this.fail(req, res, error)
     }

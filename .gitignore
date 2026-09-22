@@ -1,6 +1,11 @@
 .DS_Store
+constructdigital-backend/src/config/config.override.js
+constructdigital-backend/config.override.js
 node_modules/
 dist/
 *.log
 .idea/
 .vscode/
+
+# 用户端独立仓库，提交到 Gitee，不进 GitHub
+construct-digital/

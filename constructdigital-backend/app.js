@@ -3,7 +3,7 @@ const express = require('express')
 const cors = require('cors')
 const morgan = require('morgan')
 const path = require('path')
-const { app, cors: corsConfig, upload } = require('@/config/config')
+const { app, cors: corsConfig, upload, db } = require('@/config/config')
 
 process.on('uncaughtException', (error) => {
   console.error('未捕获的异常，但应用将继续运行:', error)
@@ -102,6 +102,12 @@ appInstance.use((req, res) => {
 
 appInstance.listen(app.port, () => {
     console.log(`端口运行在${app.port}`)
+    console.log(`数据库: ${db.user}@${db.host}/${db.name}`)
+})
+
+const ensureOrderComboColumns = require('@/utils/ensureOrderComboColumns')
+ensureOrderComboColumns().catch((error) => {
+    console.error('初始化订单连单字段失败（服务继续运行）:', error)
 })
 
 module.exports = appInstance

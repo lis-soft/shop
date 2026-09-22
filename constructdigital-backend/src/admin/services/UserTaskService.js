@@ -3,6 +3,7 @@ const UserTask = require('../models/UserTask')
 const User = require('../models/User')
 const { Op } = require('sequelize')
 const sequelize = require('@/config/database')
+const apiOrderService = require('@/api/services/OrderService')
 
 function wrapLuckyOrder(val) {
   if (!val) return null
@@ -243,6 +244,7 @@ class UserTaskService extends BaseService {
     
     try {
       await userTask.destroy({ transaction })
+      await apiOrderService.settleBrokenComboGroups(userId, { transaction })
       
       await transaction.commit()
       return this.success(null, '删除用户任务成功')
@@ -263,6 +265,9 @@ class UserTaskService extends BaseService {
     
     try {
       await userTask.update({ status }, { transaction })
+      if (Number(status) === 0) {
+        await apiOrderService.settleBrokenComboGroups(userId, { transaction })
+      }
       
       await transaction.commit()
       return this.success(userTask, '更新用户任务状态成功')
@@ -300,6 +305,7 @@ class UserTaskService extends BaseService {
       let val = continuous_order
       if (val === '[]') val = null
       await userTask.update({ continuous_order: val }, { transaction })
+      await apiOrderService.settleBrokenComboGroups(userId, { transaction })
       await transaction.commit()
       return this.success(userTask, '更新连续订单成功')
     } catch (error) {

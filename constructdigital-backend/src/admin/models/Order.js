@@ -69,6 +69,24 @@ Order.init({
     defaultValue: 0,
     comment: '幸运订单 0-否 1-是'
   },
+  is_manual: {
+    type: DataTypes.TINYINT,
+    allowNull: false,
+    defaultValue: 0,
+    comment: '卡单 0-否 1-是'
+  },
+  sequence_no: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
+    comment: '本轮订单序号'
+  },
+  settlement_held: {
+    type: DataTypes.TINYINT,
+    allowNull: false,
+    defaultValue: 0,
+    comment: '连单待统一结算 0-否 1-是'
+  },
   status: {
     type: DataTypes.TINYINT,
     allowNull: false,

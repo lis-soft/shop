@@ -55,6 +55,7 @@ module.exports = {
   '订单创建成功': 'Order created successfully',
   '订单不存在或已处理': 'Order does not exist or has been processed',
   '订单已完成': 'Order completed',
+  '连单未结束，完成后统一返还': 'Combo orders are not finished. Funds will be returned after the last order is completed.',
   '冻结金额不足': 'Insufficient frozen amount',
   '无可用商品': 'No available products',
   '暂无符合当前余额金额范围的商品': 'No products match the current balance price range',

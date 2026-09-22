@@ -14,6 +14,7 @@ const AUTO_ORDER_PRICE_MIN_PERCENT_KEY = 'auto_order_price_min_percent'
 const AUTO_ORDER_PRICE_MAX_PERCENT_KEY = 'auto_order_price_max_percent'
 const DEFAULT_AUTO_ORDER_PRICE_MIN_PERCENT = 30
 const DEFAULT_AUTO_ORDER_PRICE_MAX_PERCENT = 80
+const COMBO_SETTLEMENT_NOTICE = '连单未结束，完成后统一返还'
 
 class OrderService extends BaseService {
     getAvailableBalance(user) {
@@ -104,6 +105,382 @@ class OrderService extends BaseService {
             },
             transaction
         })
+    }
+
+    parseContinuousOrders(raw) {
+        if (!raw) {
+            return []
+        }
+
+        try {
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+            const list = Array.isArray(parsed) ? parsed.flat() : [parsed]
+            return list.filter(Boolean)
+        } catch {
+            return []
+        }
+    }
+
+    getOrderSequenceNo(orderLike) {
+        const sequenceNo = Number(orderLike?.sequence_no)
+        return Number.isInteger(sequenceNo) && sequenceNo > 0 ? sequenceNo : 0
+    }
+
+    remainingHasSequence(continuousOrders, sequenceNo) {
+        const target = Number(sequenceNo)
+        if (!Number.isInteger(target) || target <= 0 || !Array.isArray(continuousOrders)) {
+            return false
+        }
+
+        return continuousOrders.some(item => Number(item?.start_after) === target)
+    }
+
+    parseLuckyOrders(raw) {
+        if (!raw) {
+            return []
+        }
+
+        try {
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+            if (!Array.isArray(parsed) || parsed.length === 0) {
+                return []
+            }
+
+            const groups = Array.isArray(parsed[0]) ? parsed : [parsed]
+            return groups.flat().filter(Boolean)
+        } catch {
+            return []
+        }
+    }
+
+    isForcedDispatchAt(userTask, sequenceNo) {
+        if (!userTask || Number(userTask.status) !== 1) {
+            return false
+        }
+
+        const target = Number(sequenceNo)
+        if (!Number.isInteger(target) || target <= 0) {
+            return false
+        }
+
+        if (this.remainingHasSequence(this.parseContinuousOrders(userTask.continuous_order), target)) {
+            return true
+        }
+
+        return this.parseLuckyOrders(userTask.lucky_order).some(item => Number(item?.start_after) === target)
+    }
+
+    async getExistingCardSequenceSet(user, transaction = null, taskForce = user?.task_force) {
+        const sequences = new Set()
+        const userTask = await UserTask.findOne({
+            where: { user_id: user.id },
+            transaction
+        })
+        if (Number(userTask?.status) === 1) {
+            const remainingOrders = this.parseContinuousOrders(userTask?.continuous_order)
+            remainingOrders.forEach(item => {
+                const sequenceNo = Number(item?.start_after)
+                if (Number.isInteger(sequenceNo) && sequenceNo > 0) {
+                    sequences.add(sequenceNo)
+                }
+            })
+        }
+
+        const unfinishedManualOrders = await Order.findAll({
+            where: {
+                user_id: user.id,
+                task_force: taskForce,
+                is_manual: 1,
+                status: { [Op.in]: ACTIVE_FROZEN_ORDER_STATUSES }
+            },
+            attributes: ['sequence_no'],
+            transaction
+        })
+        unfinishedManualOrders.forEach(order => {
+            const sequenceNo = this.getOrderSequenceNo(order)
+            if (sequenceNo > 0) {
+                sequences.add(sequenceNo)
+            }
+        })
+
+        return sequences
+    }
+
+    async hasHeldComboOrders(user, taskForce = user?.task_force, transaction = null) {
+        const count = await Order.count({
+            where: {
+                user_id: user.id,
+                task_force: taskForce,
+                is_manual: 1,
+                settlement_held: 1,
+                status: 1
+            },
+            transaction
+        })
+        return count > 0
+    }
+
+    buildComboPayload(pending, heldPending = false) {
+        return {
+            combo_settlement_pending: pending ? 1 : 0,
+            combo_settlement_notice: pending ? COMBO_SETTLEMENT_NOTICE : '',
+            combo_held_pending: heldPending ? 1 : 0
+        }
+    }
+
+    async hasNextConsecutiveCardOrder(user, order, transaction = null) {
+        const sequenceNo = this.getOrderSequenceNo(order)
+        if (!sequenceNo || Number(order?.is_manual) !== 1) {
+            return false
+        }
+
+        const existingSequences = await this.getExistingCardSequenceSet(user, transaction, order.task_force)
+        return existingSequences.has(sequenceNo + 1)
+    }
+
+    async collectConsecutiveHeldGroup(user, currentOrder, transaction = null) {
+        const currentSequenceNo = this.getOrderSequenceNo(currentOrder)
+        const heldOrders = await Order.findAll({
+            where: {
+                user_id: user.id,
+                task_force: currentOrder.task_force,
+                is_manual: 1,
+                settlement_held: 1,
+                status: 1,
+                id: { [Op.ne]: currentOrder.id }
+            },
+            order: [['sequence_no', 'ASC'], ['id', 'ASC']],
+            transaction,
+            ...(transaction ? { lock: transaction.LOCK.UPDATE } : {})
+        })
+
+        const group = []
+        let expectedSequenceNo = currentSequenceNo - 1
+        for (let index = heldOrders.length - 1; index >= 0; index--) {
+            const heldOrder = heldOrders[index]
+            const heldSequenceNo = this.getOrderSequenceNo(heldOrder)
+            if (heldSequenceNo === expectedSequenceNo) {
+                group.unshift(heldOrder)
+                expectedSequenceNo -= 1
+                continue
+            }
+
+            if (heldSequenceNo > expectedSequenceNo) {
+                continue
+            }
+
+            break
+        }
+
+        return [...group, currentOrder]
+    }
+
+    splitConsecutiveHeldRuns(heldOrders) {
+        const runs = []
+        let currentRun = []
+
+        for (const order of heldOrders) {
+            const sequenceNo = this.getOrderSequenceNo(order)
+            const lastOrder = currentRun[currentRun.length - 1]
+            const lastSequenceNo = this.getOrderSequenceNo(lastOrder)
+
+            if (currentRun.length === 0 || sequenceNo === lastSequenceNo + 1) {
+                currentRun.push(order)
+                continue
+            }
+
+            runs.push(currentRun)
+            currentRun = [order]
+        }
+
+        if (currentRun.length > 0) {
+            runs.push(currentRun)
+        }
+
+        return runs
+    }
+
+    async applyDeferredSettlement(user, order, {
+        ip,
+        transaction,
+        distributeTeam = true,
+        principalRemark = '订单返还本金 订单号{order_id}',
+        commissionRemark = '订单佣金 订单号{order_id}'
+    } = {}) {
+        const settlement = await this.resolveOrderSettlement(user, order, transaction)
+        const { total, commission, freezeAmount, legacyMode, settlementMode } = settlement
+        const beforeFrozen = parseFloat(user.frozen_balance)
+        const beforeBalance = parseFloat(user.balance)
+        const beforeAvailable = this.getAvailableBalance(user)
+
+        if (beforeFrozen < freezeAmount) {
+            throw new Error('冻结金额不足')
+        }
+
+        const afterFrozen = +(beforeFrozen - freezeAmount).toFixed(8)
+        const afterBalance = legacyMode
+            ? +(beforeBalance + total + commission).toFixed(8)
+            : settlementMode === 'deferred'
+                ? +(beforeBalance + commission).toFixed(8)
+                : beforeBalance
+        const afterPrincipalBalance = legacyMode
+            ? +(beforeBalance + total).toFixed(8)
+            : +(beforeAvailable + total).toFixed(8)
+        const afterCommissionBalance = legacyMode
+            ? afterBalance
+            : +(afterPrincipalBalance + commission).toFixed(8)
+
+        await user.update({ frozen_balance: afterFrozen, balance: afterBalance }, { transaction })
+        user.frozen_balance = afterFrozen
+        user.balance = afterBalance
+
+        await MoneyLog.createLog({
+            user_id: user.id,
+            type: 5,
+            amount: total,
+            before_balance: legacyMode ? beforeBalance : beforeAvailable,
+            after_balance: afterPrincipalBalance,
+            remark: principalRemark,
+            order_id: order.order_id,
+            status: 1,
+            ip,
+            transaction
+        })
+
+        await MoneyLog.createLog({
+            user_id: user.id,
+            type: 3,
+            amount: commission,
+            before_balance: afterPrincipalBalance,
+            after_balance: afterCommissionBalance,
+            remark: commissionRemark,
+            order_id: order.order_id,
+            status: 1,
+            ip,
+            transaction
+        })
+
+        await this.markOrderSpendLogSettled(order.order_id, transaction)
+
+        if (distributeTeam) {
+            await this._distributeTeamCommission(user, commission, order.order_id, transaction)
+        }
+
+        await order.update({
+            status: 1,
+            settlement_held: 0
+        }, { transaction })
+        order.status = 1
+        order.settlement_held = 0
+    }
+
+    async finalizeOrderCompletion(user, order, {
+        ip,
+        transaction,
+        skipAvailableCheck = false,
+        distributeTeam = true,
+        principalRemark = '订单返还本金 订单号{order_id}',
+        commissionRemark = '订单佣金 订单号{order_id}'
+    } = {}) {
+        const beforeAvailable = this.getAvailableBalance(user)
+        if (!skipAvailableCheck && beforeAvailable < -1e-8) {
+            throw new Error(`当前订单金额超出可用余额，请等待充值后再提交。当前还差 ${this.formatAmount(Math.abs(beforeAvailable))}`)
+        }
+
+        const shouldHold = Number(order.is_manual) === 1
+            && await this.hasNextConsecutiveCardOrder(user, order, transaction)
+
+        if (shouldHold) {
+            await order.update({
+                status: 1,
+                settlement_held: 1
+            }, { transaction })
+            order.status = 1
+            order.settlement_held = 1
+            return {
+                settlement_held: 1,
+                combo_group_settled: 0,
+                ...this.buildComboPayload(true, true)
+            }
+        }
+
+        const group = await this.collectConsecutiveHeldGroup(user, order, transaction)
+        for (const item of group) {
+            const isCurrentOrder = item.id === order.id
+            await this.applyDeferredSettlement(user, item, {
+                ip,
+                transaction,
+                distributeTeam: isCurrentOrder ? distributeTeam : true,
+                principalRemark: isCurrentOrder ? principalRemark : '订单返还本金 订单号{order_id}',
+                commissionRemark: isCurrentOrder ? commissionRemark : '订单佣金 订单号{order_id}'
+            })
+        }
+
+        return {
+            settlement_held: 0,
+            combo_group_settled: group.length > 1 ? 1 : 0,
+            ...this.buildComboPayload(false, false)
+        }
+    }
+
+    async settleBrokenComboGroups(userId, {
+        ip,
+        transaction,
+        forceAll = false,
+        user: passedUser = null
+    } = {}) {
+        const ownTransaction = !transaction
+        const activeTransaction = transaction || await sequelize.transaction()
+
+        try {
+            const user = passedUser || await User.findByPk(userId, {
+                transaction: activeTransaction,
+                lock: activeTransaction.LOCK.UPDATE
+            })
+            if (!user) {
+                throw new Error('用户不存在')
+            }
+
+            const heldOrders = await Order.findAll({
+                where: {
+                    user_id: user.id,
+                    task_force: user.task_force,
+                    is_manual: 1,
+                    settlement_held: 1,
+                    status: 1
+                },
+                order: [['sequence_no', 'ASC'], ['id', 'ASC']],
+                transaction: activeTransaction,
+                lock: activeTransaction.LOCK.UPDATE
+            })
+
+            const runs = this.splitConsecutiveHeldRuns(heldOrders)
+            for (const group of runs) {
+                const lastOrder = group[group.length - 1]
+                if (!forceAll && await this.hasNextConsecutiveCardOrder(user, lastOrder, activeTransaction)) {
+                    continue
+                }
+
+                for (const item of group) {
+                    await this.applyDeferredSettlement(user, item, {
+                        ip,
+                        transaction: activeTransaction,
+                        distributeTeam: true
+                    })
+                }
+            }
+
+            if (ownTransaction) {
+                await activeTransaction.commit()
+            }
+
+            return user
+        } catch (error) {
+            if (ownTransaction) {
+                await activeTransaction.rollback()
+            }
+            throw error
+        }
     }
 
     parsePercentConfig(value, fallback) {
@@ -263,6 +640,10 @@ class OrderService extends BaseService {
 
     isManualDispatchOrder(orderLike, vip) {
         const orderData = typeof orderLike?.toJSON === 'function' ? orderLike.toJSON() : (orderLike || {})
+        if (Number(orderData?.is_manual) === 1) {
+            return true
+        }
+
         if (Number(orderData?.is_lucky) === 1) {
             return false
         }
@@ -326,7 +707,15 @@ class OrderService extends BaseService {
                 return +((orderCommission / orderPrice) * 100).toFixed(2)
             })()
         const displayRewardRate = this.getDisplayRewardRate(orderData, vip, calculatedRewardRate)
-        const isManualDispatch = options?.manualDispatch === true || this.isManualDispatchOrder(orderData, vip)
+        const isManualDispatch = options?.manualDispatch === true
+            || Number(orderData.is_manual) === 1
+            || this.isManualDispatchOrder(orderData, vip)
+        const comboPending = options?.comboPending === true
+            || Number(orderData.settlement_held) === 1
+            || Number(orderData.combo_settlement_pending) === 1
+        const comboHeldPending = options?.comboHeldPending === true
+            || Number(orderData.combo_held_pending) === 1
+            || Number(orderData.settlement_held) === 1
 
         return {
             ...orderData,
@@ -338,7 +727,8 @@ class OrderService extends BaseService {
             card_reward_rate: this.normalizeRate(vip?.card_reward_rate),
             display_reward_rate: displayRewardRate,
             is_manual_dispatch: isManualDispatch ? 1 : 0,
-            available_balance_after_completion: options?.availableBalanceAfterCompletion ?? null
+            available_balance_after_completion: options?.availableBalanceAfterCompletion ?? null,
+            ...this.buildComboPayload(comboPending, comboHeldPending)
         }
     }
 
@@ -363,7 +753,14 @@ class OrderService extends BaseService {
         }
 
         const product = await Product.findByPk(currentOrder.product_id)
-        return this.buildOrderPayload(currentOrder, product, { vip: user.vip })
+        const comboPending = Number(currentOrder.is_manual) === 1
+            && await this.hasNextConsecutiveCardOrder(user, currentOrder)
+        const comboHeldPending = await this.hasHeldComboOrders(user, currentOrder.task_force)
+        return this.buildOrderPayload(currentOrder, product, {
+            vip: user.vip,
+            comboPending,
+            comboHeldPending
+        })
     }
 
     async createOrder(req) {
@@ -380,11 +777,6 @@ class OrderService extends BaseService {
 
             if (user.is_task == 0) {
                 throw new Error('您已被禁止抢单')
-            }
-
-            const availableBalance = this.getAvailableBalance(user)
-            if (availableBalance <= 0) {
-                throw new Error('余额不足')
             }
 
             const taskForce = parseFloat(user.task_force)
@@ -421,6 +813,12 @@ class OrderService extends BaseService {
                 Order.count({ where: { user_id: user.id, task_force: taskForce }, transaction })
             ])
 
+            const availableBalance = this.getAvailableBalance(user)
+            const nextForcedDispatch = this.isForcedDispatchAt(userTask, orderCount + 1)
+            if (availableBalance <= 0 && !nextForcedDispatch) {
+                throw new Error('余额不足')
+            }
+
             if (userTask) {
                 let continuousOrders = []
                 try {
@@ -434,6 +832,7 @@ class OrderService extends BaseService {
                             isLucky: false,
                             allowOverAvailable: true,
                             manualDispatch: true,
+                            sequenceNo: orderCount + 1,
                             transaction,
                             ip: req.ip
                         })
@@ -443,7 +842,14 @@ class OrderService extends BaseService {
                             status: continuousOrders.length === 0 ? 0 : 1
                         }, { transaction })
                         await transaction.commit()
-                        return lastOrder
+                        const comboHeldPending = await this.hasHeldComboOrders(user, taskForce)
+                        return {
+                            ...lastOrder,
+                            ...this.buildComboPayload(
+                                this.remainingHasSequence(continuousOrders, orderCount + 2),
+                                comboHeldPending
+                            )
+                        }
                     }
                 }
 
@@ -464,6 +870,7 @@ class OrderService extends BaseService {
                         const order = await this._createOrder(user, vip, orderData, taskForce, {
                             isLucky: true,
                             allowOverAvailable: true,
+                            sequenceNo: orderCount + 1,
                             transaction,
                             ip: req.ip
                         })
@@ -507,6 +914,7 @@ class OrderService extends BaseService {
                 order_nums: 1,
                 price
             }, taskForce, {
+                sequenceNo: orderCount + 1,
                 transaction,
                 ip: req.ip
             })
@@ -524,6 +932,7 @@ class OrderService extends BaseService {
             isLucky = false,
             allowOverAvailable = false,
             manualDispatch = false,
+            sequenceNo = 0,
             transaction,
             ip
         } = options
@@ -589,6 +998,9 @@ class OrderService extends BaseService {
             order_commission: commission,
             task_force: taskForce,
             is_lucky: isLucky ? 1 : 0,
+            is_manual: manualDispatch ? 1 : 0,
+            sequence_no: Number.isInteger(Number(sequenceNo)) ? Number(sequenceNo) : 0,
+            settlement_held: 0,
             status: 0
         }, { transaction })
 
@@ -607,10 +1019,12 @@ class OrderService extends BaseService {
             transaction
         })
 
+        const comboHeldPending = await this.hasHeldComboOrders(user, taskForce, transaction)
         return this.buildOrderPayload(order, product, {
             rewardRate: appliedRate,
             vip,
-            manualDispatch
+            manualDispatch,
+            comboHeldPending
         })
     }
 
@@ -655,68 +1069,15 @@ class OrderService extends BaseService {
                 throw new Error('您已被禁止抢单')
             }
 
-            const settlement = await this.resolveOrderSettlement(user, order, transaction)
-            const { total, commission, freezeAmount, legacyMode, settlementMode } = settlement
-            const beforeFrozen = parseFloat(user.frozen_balance)
-            const beforeBalance = parseFloat(user.balance)
-            const beforeAvailable = this.getAvailableBalance(user)
-
-            if (beforeAvailable < -1e-8) {
-                throw new Error(`当前订单金额超出可用余额，请等待充值后再提交。当前还差 ${this.formatAmount(Math.abs(beforeAvailable))}`)
-            }
-
-            if (beforeFrozen < freezeAmount) {
-                throw new Error('冻结金额不足')
-            }
-
-            const afterFrozen = +(beforeFrozen - freezeAmount).toFixed(8)
-            const afterBalance = legacyMode
-                ? +(beforeBalance + total + commission).toFixed(8)
-                : settlementMode === 'deferred'
-                    ? +(beforeBalance + commission).toFixed(8)
-                    : beforeBalance
-            const afterPrincipalBalance = legacyMode
-                ? +(beforeBalance + total).toFixed(8)
-                : +(beforeAvailable + total).toFixed(8)
-            const afterCommissionBalance = legacyMode
-                ? afterBalance
-                : +(afterPrincipalBalance + commission).toFixed(8)
-
-            await user.update({ frozen_balance: afterFrozen, balance: afterBalance }, { transaction })
-
-            await MoneyLog.createLog({
-                user_id: user.id,
-                type: 5,
-                amount: total,
-                before_balance: legacyMode ? beforeBalance : beforeAvailable,
-                after_balance: afterPrincipalBalance,
-                remark: `订单返还本金 订单号{order_id}`,
-                order_id: order.order_id,
-                status: 1,
+            const result = await this.finalizeOrderCompletion(user, order, {
                 ip: req.ip,
-                transaction
+                transaction,
+                skipAvailableCheck: false,
+                distributeTeam: true
             })
-
-            await MoneyLog.createLog({
-                user_id: user.id,
-                type: 3,
-                amount: commission,
-                before_balance: afterPrincipalBalance,
-                after_balance: afterCommissionBalance,
-                remark: `订单佣金 订单号{order_id}`,
-                order_id: order.order_id,
-                status: 1,
-                ip: req.ip,
-                transaction
-            })
-
-            await this.markOrderSpendLogSettled(order.order_id, transaction)
-            await this._distributeTeamCommission(user, commission, order.order_id, transaction)
-
-            await order.update({ status: 1 }, { transaction })
 
             await transaction.commit()
-            return null
+            return result
         } catch (error) {
             await transaction.rollback()
             throw error
@@ -800,15 +1161,19 @@ class OrderService extends BaseService {
                 created_at: { [Op.gte]: today, [Op.lt]: tomorrow }
             }
         })
-        const roundProfit = roundOrders.reduce((sum, o) => sum + parseFloat(o.order_commission), 0)
+        const roundProfit = roundOrders
+            .filter(order => Number(order.settlement_held) !== 1)
+            .reduce((sum, o) => sum + parseFloat(o.order_commission), 0)
 
         const allOrders = await Order.findAll({
             where: { user_id: user.id, task_force: user.task_force, status: 1 }
         })
-        const totalProfit = allOrders.reduce((sum, o) => sum + parseFloat(o.order_commission), 0)
-        const released = allOrders.reduce((sum, o) => sum + parseFloat(o.order_price), 0)
+        const settledOrders = allOrders.filter(order => Number(order.settlement_held) !== 1)
+        const totalProfit = settledOrders.reduce((sum, o) => sum + parseFloat(o.order_commission), 0)
+        const released = settledOrders.reduce((sum, o) => sum + parseFloat(o.order_price), 0)
 
         const pending = Math.max(0, parseFloat(user.frozen_balance) || 0)
+        const comboHeldPending = allOrders.some(order => Number(order.settlement_held) === 1)
 
         return {
             todayEarnings: parseFloat((todayEarnings || 0).toFixed(2)),
@@ -819,7 +1184,9 @@ class OrderService extends BaseService {
             completed_tasks: allOrders.length,
             current_round_earnings: parseFloat(roundProfit.toFixed(2)),
             task_total: vip.task_count,
-            profit_rate: parseFloat(vip.reward_rate)
+            profit_rate: parseFloat(vip.reward_rate),
+            combo_held_pending: comboHeldPending ? 1 : 0,
+            combo_settlement_pending: comboHeldPending ? 1 : 0
         }
     }
 
@@ -872,8 +1239,14 @@ class OrderService extends BaseService {
             return map
         }, {})
 
+        const nextCardSequences = await this.getExistingCardSequenceSet(user)
+        const comboHeldPending = await this.hasHeldComboOrders(user)
+
         const data = rows.map(order => this.buildOrderPayload(order, order.product || null, {
-            availableBalanceAfterCompletion: settlementBalanceMap[order.order_id] ?? null
+            availableBalanceAfterCompletion: settlementBalanceMap[order.order_id] ?? null,
+            comboPending: Number(order.settlement_held) === 1
+                || (Number(order.status) === 0 && Number(order.is_manual) === 1 && nextCardSequences.has(this.getOrderSequenceNo(order) + 1)),
+            comboHeldPending
         }))
 
         return {

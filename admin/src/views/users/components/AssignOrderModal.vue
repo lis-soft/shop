@@ -128,6 +128,9 @@
           </template>
           <span v-else class="sequence-empty">暂无</span>
         </div>
+        <div class="combo-settlement-tip">
+          连续卡单按相邻序号分组。例如卡 16、17 和 20、21、22：第 17 单完成后退还 16、17 的本金和佣金，第 22 单完成后退还 20、21、22 的本金和佣金。中间单显示「连单未结束，完成后统一返还」。不相邻的卡单互不影响。
+        </div>
       </div>
 
       <div class="modal-footer">
@@ -677,6 +680,17 @@ export default defineComponent({
       .sequence-empty {
         color: #999;
       }
+    }
+
+    .combo-settlement-tip {
+      margin-top: 8px;
+      padding: 8px 12px;
+      background: #fff7e6;
+      border: 1px solid #ffe7ba;
+      border-radius: 6px;
+      color: #ad6800;
+      font-size: 12px;
+      line-height: 1.6;
     }
   }
   

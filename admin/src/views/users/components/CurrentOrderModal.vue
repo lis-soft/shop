@@ -85,6 +85,14 @@
             <template #extra>
               <unordered-list-outlined />
             </template>
+            <a-alert
+              v-if="continuousOrders && continuousOrders.length > 0"
+              type="warning"
+              show-icon
+              class="combo-settlement-alert"
+              message="连单未结束，完成后统一返还"
+              description="连续卡单按相邻序号分组。例如 16、17 为一组，20、21、22 为另一组。每组最后一单完成才返还该组本金和佣金；中途删除后续卡单会立刻结算已扣住的金额。"
+            />
             <div v-if="continuousOrders && continuousOrders.length > 0" class="order-content">
               <a-row :gutter="[16, 16]">
                 <a-col :xs="24" :sm="12" :md="8" v-for="(item, index) in continuousOrders" :key="index">
@@ -450,6 +458,10 @@ export default defineComponent({
     .order-card {
       margin-bottom: 24px;
       border-radius: 8px;
+
+      .combo-settlement-alert {
+        margin-bottom: 16px;
+      }
       
       .order-content {
         padding: 8px 0;

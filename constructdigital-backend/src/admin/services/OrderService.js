@@ -7,6 +7,7 @@ const AdminLog = require('../models/AdminLog')
 const { Op } = require('sequelize')
 const sequelize = require('@/config/database')
 const XLSX = require('xlsx')
+const apiOrderService = require('@/api/services/OrderService')
 
 const ALLOWED_NON_SETTLEMENT_STATUSES = new Set([0, 2, 3, 5])
 
@@ -206,62 +207,15 @@ class OrderService extends BaseService {
       if (order.status !== 0) {
         throw new Error('只有未完成的订单才能手动完成')
       }
-      
-      const settlement = await this.resolveOrderSettlement(user, order, transaction)
-      const { total, commission, freezeAmount, legacyMode, settlementMode } = settlement
-      const beforeFrozen = parseFloat(user.frozen_balance)
-      const beforeBalance = parseFloat(user.balance)
-      const beforeAvailable = this.getAvailableBalance(user)
-      
-      if (beforeFrozen < freezeAmount) {
-        throw new Error('冻结金额不足')
-      }
 
-      const afterFrozen = +(beforeFrozen - freezeAmount).toFixed(8)
-      const afterBalance = legacyMode
-        ? +(beforeBalance + total + commission).toFixed(8)
-        : settlementMode === 'deferred'
-          ? +(beforeBalance + commission).toFixed(8)
-          : beforeBalance
-      const afterPrincipalBalance = legacyMode
-        ? +(beforeBalance + total).toFixed(8)
-        : +(beforeAvailable + total).toFixed(8)
-      const afterCommissionBalance = legacyMode
-        ? afterBalance
-        : +(afterPrincipalBalance + commission).toFixed(8)
-      
-      await user.update({
-        frozen_balance: afterFrozen,
-        balance: afterBalance
-      }, { transaction })
-      
-      await MoneyLog.createLog({
-        user_id: user.id,
-        type: 5,
-        amount: total,
-        before_balance: legacyMode ? beforeBalance : beforeAvailable,
-        after_balance: afterPrincipalBalance,
-        remark: `返还本金 订单号{order_id}`,
-        order_id: order.order_id,
-        status: 1,
-        transaction
+      await apiOrderService.finalizeOrderCompletion(user, order, {
+        ip,
+        transaction,
+        skipAvailableCheck: true,
+        distributeTeam: false,
+        principalRemark: '返还本金 订单号{order_id}',
+        commissionRemark: '发放佣金 订单号{order_id}'
       })
-      
-      await MoneyLog.createLog({
-        user_id: user.id,
-        type: 3,
-        amount: commission,
-        before_balance: afterPrincipalBalance,
-        after_balance: afterCommissionBalance,
-        remark: `发放佣金 订单号{order_id}`,
-        order_id: order.order_id,
-        status: 1,
-        transaction
-      })
-
-      await this.markOrderSpendLogSettled(order.order_id, transaction)
-      
-      await order.update({ status: 1 }, { transaction })
       
       await transaction.commit()
       
@@ -341,6 +295,14 @@ class OrderService extends BaseService {
       await this.markOrderSpendLogSettled(order.order_id, transaction)
       
       await order.destroy({ transaction })
+
+      user.frozen_balance = afterFrozen
+      user.balance = afterBalance
+      await apiOrderService.settleBrokenComboGroups(user.id, {
+        ip,
+        transaction,
+        user
+      })
 
       await transaction.commit()
       

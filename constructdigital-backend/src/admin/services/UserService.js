@@ -13,6 +13,7 @@ const Vip = require('@/admin/models/Vip')
 const UserBank = require('@/admin/models/UserBank')
 const { getClientIp, getIpLocation } = require('@/utils/getClientIp')
 const orderService = require('./OrderService')
+const apiOrderService = require('@/api/services/OrderService')
 
 const ACTIVE_FROZEN_ORDER_STATUSES = [0, 2, 3, 5]
 
@@ -536,6 +537,17 @@ class UserService extends BaseService {
       currentBalance = Number.isFinite(currentBalance) ? currentBalance : 0
       currentFrozen = Number.isFinite(currentFrozen) ? currentFrozen : 0
 
+      await apiOrderService.settleBrokenComboGroups(user.id, {
+        ip: req.ip,
+        transaction,
+        forceAll: true,
+        user
+      })
+      currentBalance = parseFloat(user.balance)
+      currentFrozen = parseFloat(user.frozen_balance)
+      currentBalance = Number.isFinite(currentBalance) ? currentBalance : 0
+      currentFrozen = Number.isFinite(currentFrozen) ? currentFrozen : 0
+
       for (const order of activeOrders) {
         const userSnapshot = {
           balance: currentBalance,
@@ -643,6 +655,10 @@ class UserService extends BaseService {
       } else {
         result = await UserTask.create(taskData, { transaction })
       }
+
+      await apiOrderService.settleBrokenComboGroups(userId, {
+        transaction
+      })
 
       await transaction.commit()
       return this.success(result)
